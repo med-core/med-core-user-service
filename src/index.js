@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import userRoutes from "./router/user.routes.js";
+import userRoutes from "./router/userRoutes.js";
 
 dotenv.config();
 
@@ -21,4 +21,7 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 3002;
 app.listen(PORT, () => {
   console.log(`User Service corriendo en el puerto ${PORT}`);
+});
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
 });
