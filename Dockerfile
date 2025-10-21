@@ -1,16 +1,19 @@
 FROM node:20-alpine
 WORKDIR /app
-EXPOSE 3003
-CMD ["node", "src/index.js"]
+EXPOSE 3002
 
-# Copy package.json and prisma schema first
+ARG DATABASE_URL
+ENV DATABASE_URL=$DATABASE_URL 
+
 COPY package*.json prisma/ ./
 
-# Install dependencies
 RUN npm install --production
 
-# Generate Prisma Client
+RUN apk add --no-cache curl
+
 RUN npx prisma generate
 
-# Copy the rest of the code
+ENV DATABASE_URL= 
+
 COPY . .
+CMD ["node", "src/index.js"]

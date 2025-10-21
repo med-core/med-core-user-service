@@ -1,10 +1,9 @@
-import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcrypt";
 import { Readable } from "stream";
 import csv from "csv-parser";
 import { validateUserData } from "../middlewares/validateUserData.js";
+import { getPrismaClient } from "../config/database.js";
 
-const prisma = new PrismaClient();
 
 // Normalizador de roles
 export function normalizeRole(role) {
@@ -21,6 +20,7 @@ export function normalizeRole(role) {
 // ----------------------
 export const getAllUsers = async (req, res) => {
   try {
+    const prisma = getPrismaClient();
     const users = await prisma.users.findMany();
     res.json(users);
   } catch (err) {
