@@ -4,24 +4,24 @@ import { uploadUsers, getAllUsers } from "../controllers/UserController.js";
 
 const router = express.Router();
 
-function getMulterStorage() {
-  // Vercel
-  if (process.env.VERCEL) {
-    return multer.memoryStorage();
+// Solo CSV
+function csvFilter(req, file, cb) {
+  if (file.mimetype === "text/csv" || file.originalname.endsWith(".csv")) {
+    cb(null, true);
+  } else {
+    cb(new Error("Solo se permiten archivos CSV"), false);
   }
-
-  // Entorno local -> se puede usar diskStorage
-  return multer.diskStorage({
-    destination: (req, file, cb) => cb(null, "uploads/"),
-    filename: (req, file, cb) =>
-      cb(null, Date.now() + "-" + file.originalname),
-  });
 }
 
-const upload = multer({ storage: getMulterStorage() });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: csvFilter,
+  limits: { fileSize: 60 * 1024 * 1024 },
+});
 
 // Rutas
 router.post("/upload-users", upload.single("file"), uploadUsers);
+router.post("/create",createUser)
 router.get("/all", getAllUsers);
 
 export default router;

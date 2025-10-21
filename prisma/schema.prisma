@@ -14,14 +14,22 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 model Users {
-  id       String   @id @default(auto()) @map("_id") @db.ObjectId
-  email    String   @unique
-  password String
-  fullname String
-  role     Role     @default(PACIENTE)
-  status   UserStatus @default(PENDING)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                  String    @id @default(auto()) @map("_id") @db.ObjectId
+  email               String    @unique
+  fullname            String
+  identificacion      String?   @unique
+  role                Role      @default(PACIENTE)
+  current_password    String
+  status              String    @default("PENDING")
+  specialization      String?
+  department          String?
+  license_number      String?
+  phone               String?
+  date_of_birth       DateTime?
+  verificationCode    String?
+  verificationExpires DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 }
 
 enum Role {

@@ -5,20 +5,30 @@ import { connectDB } from "./config/database.js";
 
 
 const app = express();
-app.use(cors());
+// Middleware CORS
+app.use(
+    cors({
+        origin: [
+            'http://localhost:5173'
+        ],
+        methods: ['GET', 'POST', 'PUT', 'DELETE'],
+        allowedHeaders: ['Content-Type', 'Authorization'],
+        credentials: true,
+    })
+);
 app.use(express.json());
 
 // Healthcheck endpoint
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok" });
+    res.status(200).json({ status: "ok" });
 });
 
 // Prefijo de rutas
-app.use("/api/users", userRoutes);
+app.use("/api/v1/users", userRoutes);
 
 // Prueba de ruta base
 app.get("/", (req, res) => {
-  res.send("User Service funcionando correctamente");
+    res.send("User Service funcionando correctamente");
 });
 
 const PORT = process.env.PORT || 3000;
@@ -30,7 +40,7 @@ async function startServer() {
         console.log("Conexión a MongoDB establecida para User Service.");
 
         app.listen(PORT, () => {
-            console.log(`User Service corriendo en el puerto ${PORT}`);
+            console.log(`User Service corriendo en el puerto ${PORT}`);
         });
 
     } catch (error) {

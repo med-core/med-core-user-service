@@ -1,6 +1,6 @@
 export const regex = {
-  fullname: /^[A-Za-zÁÉÍÓÚáéíóúÑñ\s]{2,100}$/,
-  identification: /^[0-9]{5,15}$/,
+  fullname: /^[A-Za-zÁÉÍÓÚáéíóúÑñ.\s]{2,100}$/,
+  identification: /^[0-9]{1,15}$/,
   phone: /^[0-9+\-()\s]{6,20}$/,
   email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
   specialization: /^[A-Za-zÁÉÍÓÚáéíóúÑñ\s]{0,100}$/,
