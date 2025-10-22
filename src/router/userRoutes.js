@@ -1,6 +1,6 @@
 import express from "express";
 import multer from "multer";
-import { uploadUsers, getAllUsers } from "../controllers/UserController.js";
+import { uploadUsers, getAllUsers, createUser } from "../controllers/UserController.js";
 
 const router = express.Router();
 
