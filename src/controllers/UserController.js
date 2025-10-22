@@ -2,6 +2,8 @@ import { Readable } from "stream";
 import csv from "csv-parser";
 import bcrypt from "bcrypt";
 import { getPrismaClient } from "../config/database.js";
+import { PrismaClient } from "@prisma/client";
+const prisma = new PrismaClient();
 
 // Normalizador de roles
 function normalizeRole(role) {
@@ -29,8 +31,8 @@ export const createUser = async (req, res) => {
   const prisma = getPrismaClient();
 
   try {
-    const { email, fullname, role, status, identificacion } = req.body;
-
+    const { email, fullname, role, status, identificacion, current_password } = req.body;
+    console.log("Body recibido:", req.body);
     const user = await prisma.users.create({
       data: {
         email,
@@ -38,6 +40,7 @@ export const createUser = async (req, res) => {
         role: role || "PACIENTE",
         status: status || "PENDING",
         identificacion: identificacion || null,
+        current_password,
       },
     });
 
@@ -122,5 +125,21 @@ export const uploadUsers = async (req, res) => {
   } catch (error) {
     console.error("Error al procesar el archivo:", error);
     return res.status(500).json({ message: "Error al procesar el archivo" });
+  }
+};
+export const updateUserStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const updatedUser = await prisma.users.update({
+      where: { id },
+      data: { status },
+    });
+
+    return res.status(200).json({ message: "Estado actualizado", user: updatedUser });
+  } catch (error) {
+    console.error("Error updating user status:", error);
+    return res.status(500).json({ message: "Error interno del servidor" });
   }
 };
