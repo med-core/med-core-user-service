@@ -1,6 +1,6 @@
 import express from "express";
 import multer from "multer";
-import { uploadUsers, getAllUsers, createUser, updateUserStatus } from "../controllers/UserController.js";
+import { uploadUsers, createUser, getAllUsers, updateUserStatus, getUserById } from "../controllers/UserController.js";
 
 const router = express.Router();
 
@@ -24,4 +24,5 @@ router.post("/upload-users", upload.single("file"), uploadUsers);
 router.post("/create",createUser)
 router.get("/all", getAllUsers);
 router.patch("/status/:id", updateUserStatus);
+router.get("/:id", getUserById)
 export default router;
