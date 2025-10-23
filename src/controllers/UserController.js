@@ -65,11 +65,12 @@ export const uploadUsers = async (req, res) => {
 
   try {
     // Leer CSV directamente del buffer
-    const stream = Readable.from(req.file.buffer.toString());
+    const stream = Readable.from(req.file.buffer);
 
     stream
-      .pipe(csv({ separator: "," }))
+      .pipe(csv({ separator: "," ,quote: '"'  }))
       .on("data", (data) => {
+        console.log("Fila leída:", data);
         // Acepta cualquier fila válida con email, fullname y password
         if (!data.email || !data.fullname || !data.current_password) return;
         results.push(data);
