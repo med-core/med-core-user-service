@@ -3,8 +3,8 @@ import csv from "csv-parser";
 import bcrypt from "bcrypt";
 import { getPrismaClient } from "../config/database.js";
 import { PrismaClient } from "@prisma/client";
+import axios from "axios"
 const prisma = new PrismaClient();
-
 // Normalizador de roles
 function normalizeRole(role) {
   if (!role) return "PACIENTE";
@@ -78,14 +78,16 @@ export const getAllUsers = async (req, res) => {
   }
 };
 
-//crear usuario
+//=================================CREAR USUARIO==================================
+
 export const createUser = async (req, res) => {
   const prisma = getPrismaClient();
 
   try {
-    const hashedPassword = await bcrypt.hash(user.current_password, 10);
     const { email, fullname, role, status, identificacion, current_password } = req.body;
-    console.log("Body recibido:", req.body);
+
+    const hashedPassword = await bcrypt.hash(current_password, 10);
+
     const user = await prisma.users.create({
       data: {
         email,
@@ -104,7 +106,7 @@ export const createUser = async (req, res) => {
   }
 };
 
-// Cargar usuarios desde CSV
+// ================= Carga masiva con integración Auth =================
 export const uploadUsers = async (req, res) => {
   if (!req.file) return res.status(400).json({ message: "No se subió ningún archivo" });
 
@@ -112,7 +114,6 @@ export const uploadUsers = async (req, res) => {
     return res.status(400).json({ message: "El archivo supera el límite de 60MB" });
   }
 
-  const prisma = getPrismaClient();
   const results = [];
 
   try {
@@ -122,8 +123,6 @@ export const uploadUsers = async (req, res) => {
     stream
       .pipe(csv({ separator: ",", quote: '"' }))
       .on("data", (data) => {
-        console.log("Fila leída:", data);
-        // Acepta cualquier fila válida con email, fullname y password
         if (!data.email || !data.fullname || !data.current_password) return;
         results.push(data);
       })
@@ -134,6 +133,7 @@ export const uploadUsers = async (req, res) => {
 
         for (const user of results) {
           try {
+            // Verificar duplicado en User Service
             const existing = await prisma.users.findUnique({
               where: { email: user.email.toLowerCase().trim() },
             });
@@ -142,9 +142,25 @@ export const uploadUsers = async (req, res) => {
               duplicates++;
               continue;
             }
+            // Crear usuario en Auth Service
+            const authResp = await axios.post("http://med-core-auth-service:3000/api/v1/auth/bulk-sign-up", {
+              users: [
+                {
+                  email: user.email.trim().toLowerCase(),
+                  current_password: user.current_password,
+                  fullname: user.fullname.trim(),
+                  role: normalizeRole(user.role),
+                  isEmailVerified: true,
+                }
+              ]
+            });
 
+            const authUserId = authResp.data.user.id;
+
+            // Hashear password para User Service
             const hashedPassword = await bcrypt.hash(user.current_password, 10);
 
+            // Crear usuario en User Service (Prisma)
             await prisma.users.create({
               data: {
                 email: user.email.trim().toLowerCase(),
@@ -158,6 +174,7 @@ export const uploadUsers = async (req, res) => {
                 phone: user.phone?.trim() || null,
                 date_of_birth: user.date_of_birth ? new Date(user.date_of_birth) : null,
                 identificacion: user.identificacion?.trim() || null,
+                authId: authUserId, // Guardamos el ID del Auth Service
               },
             });
 
@@ -169,7 +186,7 @@ export const uploadUsers = async (req, res) => {
         }
 
         return res.json({
-          message: "Carga completada correctamente",
+          message: "Carga masiva completada",
           total: results.length,
           insertados: inserted,
           duplicados: duplicates,
