@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import userRoutes from "./router/userRoutes.js";
 import { connectDB } from "./config/database.js";
+import {sendError} from "./utils/errorHandler.js"
 
 
 const app = express();
@@ -29,6 +30,9 @@ app.use("/api/v1/users", userRoutes);
 // Prueba de ruta base
 app.get("/", (req, res) => {
     res.send("User Service funcionando correctamente");
+});
+app.use((err, req, res, next) => {
+  sendError(err, res);
 });
 
 const PORT = process.env.PORT || 3000;

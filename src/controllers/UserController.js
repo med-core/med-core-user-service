@@ -15,18 +15,70 @@ function normalizeRole(role) {
   return "PACIENTE";
 }
 
-// Obtener todos los usuarios
+// Obtener todos los usuarios con filtros
 export const getAllUsers = async (req, res) => {
   try {
     const prisma = getPrismaClient();
-    const users = await prisma.users.findMany();
-    res.json(users);
+
+    // Extraer los filtros
+    const { role, specialty, specialization, state, page = 1, limit = 20 } = req.query;
+
+    // Crear el filtro dinámico
+    const where = {};
+
+    // Filtro por rol (doctor/nurse/patient)
+    if (role) {
+      const normalizedRole = role.toUpperCase();
+      if (["MEDICO", "ENFERMERO", "PACIENTE", "ADMINISTRADOR"].includes(normalizedRole)) {
+        where.role = normalizedRole;
+      }
+    }
+
+    // Filtro por estado (active|inactive|pending)
+    if (state) {
+      const normalizedState = state.toUpperCase();
+      if (["ACTIVE", "INACTIVE", "PENDING"].includes(normalizedState)) {
+        where.status = normalizedState;
+      }
+    }
+
+    // Filtro por especialidad (medicos)
+    const specialtyFilter = specialty || specialization;
+    if (specialtyFilter) {
+      where.specialization = { contains: specialtyFilter, mode: "insensitive" };
+      where.role = "MEDICO"; // fuerza solo médicos
+    }
+    // Paginación
+    const take = parseInt(limit) || 20;
+    const skip = (parseInt(page) - 1) * take;
+
+    // Consultamos los usuarios filtrados
+    const [users, total] = await Promise.all([
+      prisma.users.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.users.count({ where }),
+    ]);
+
+    const totalPages = Math.ceil(total / take);
+
+    res.json({
+      total,
+      totalPages,
+      currentPage: parseInt(page),
+      perPage: take,
+      users,
+    });
   } catch (err) {
     console.error("Error al obtener usuarios:", err);
     res.status(500).json({ message: "Error al obtener usuarios" });
   }
 };
 
+//crear usuario
 export const createUser = async (req, res) => {
   const prisma = getPrismaClient();
 
@@ -68,7 +120,7 @@ export const uploadUsers = async (req, res) => {
     const stream = Readable.from(req.file.buffer);
 
     stream
-      .pipe(csv({ separator: "," ,quote: '"'  }))
+      .pipe(csv({ separator: ",", quote: '"' }))
       .on("data", (data) => {
         console.log("Fila leída:", data);
         // Acepta cualquier fila válida con email, fullname y password
@@ -345,16 +397,27 @@ export const changeNurseState = async (req, res) => {
   }
 };
 
-// ==================== FILTRO GENERAL ====================
+// ==================== FILTRO POR ROL ====================
 export const getUsersByRole = async (req, res) => {
   try {
     const prisma = getPrismaClient();
     const { role } = req.query;
 
-    if (!role) return res.status(400).json({ message: "Debe especificar un rol" });
+    if (!role) {
+      return res.status(400).json({ message: "Debe especificar un rol" });
+    }
+
+    // Normalizar el rol a mayúsculas
+    const normalizedRole = role.toUpperCase();
+
+    // Validamos que sea un rol permitido
+    const validRoles = ["ADMINISTRADOR", "MEDICO", "ENFERMERO", "PACIENTE"];
+    if (!validRoles.includes(normalizedRole)) {
+      return res.status(400).json({ message: "Rol no válido" });
+    }
 
     const users = await prisma.users.findMany({
-      where: { role: role.toUpperCase() },
+      where: { role: normalizedRole },
     });
 
     res.json(users);
