@@ -1,24 +1,34 @@
 import express from "express";
 import multer from "multer";
-import { uploadUsers, 
-  createUser, 
-  getAllUsers, 
-  updateUserStatus, 
+import {
+  // CRUD principal de usuarios
+  uploadUsers,
+  createUser,
+  getAllUsers,
+  updateUserStatus,
   getUserById,
+  updateUser,
+
+  // Doctores
   registerDoctor,
-  registerNurse,
-  getUsersByRole,
-  getDoctorsBySpecialty,
   getDoctorById,
-  getNurseById,
   updateDoctor,
-  updateNurse,
   changeDoctorState,
-  changeNurseState,} from "../controllers/UserController.js";
+  getDoctorsBySpecialty,
+
+  // Enfermeros
+  registerNurse,
+  getNurseById,
+  updateNurse,
+  changeNurseState,
+
+  // Filtros generales
+  getUsersByRole,
+} from "../controllers/UserController.js";
 
 const router = express.Router();
 
-// Solo CSV
+// ==================== Configuración de Multer ====================
 function csvFilter(req, file, cb) {
   if (file.mimetype === "text/csv" || file.originalname.endsWith(".csv")) {
     cb(null, true);
@@ -30,30 +40,63 @@ function csvFilter(req, file, cb) {
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: csvFilter,
-  limits: { fileSize: 60 * 1024 * 1024 },
+  limits: { fileSize: 60 * 1024 * 1024 }, // 60MB
 });
+// ==================== Filtros generales ====================
 
-//Registrar un doctor
-router.post("/doctors", registerDoctor);
-//Registrar una enfermera
-router.post("/nurses", registerNurse);
-//Filtrar por rol
+// Filtrar usuarios por rol (MÉDICO, ENFERMERO, PACIENTE, etc.)
 router.get("/by-role", getUsersByRole);
-//Filtrar doctores por especialidad
-router.get("/by-specialty", getDoctorsBySpecialty);
-//Obtener doctor/enfermero por ID
+// ==================== Usuarios genéricos ====================
+
+// Carga masiva CSV
+router.post("/upload-users", upload.single("file"), uploadUsers);
+
+// Crear usuario (puede ser paciente o admin, por ejemplo)
+router.post("/create", createUser);
+
+// Obtener todos los usuarios (con paginación y filtros opcionales)
+router.get("/all", getAllUsers);
+
+// Obtener usuario individual con department/specialization enriquecidos
+router.get("/:id", getUserById);
+
+// Actualizar usuario genérico
+router.put("/:id", updateUser);
+
+// Cambiar estado (ACTIVE / INACTIVE / PENDING)
+router.patch("/status/:id", updateUserStatus);
+
+// ==================== Doctores ====================
+
+// Registrar nuevo doctor
+router.post("/doctors", registerDoctor);
+
+// Obtener doctores filtrados por especialidad
+router.get("/doctors/by-specialty", getDoctorsBySpecialty);
+
+// Obtener doctor por ID
 router.get("/doctors/:id", getDoctorById);
-router.get("/nurses/:id", getNurseById);
-//Actualizar doctor/enfermero
+
+// Actualizar doctor
 router.put("/doctors/:id", updateDoctor);
-router.put("/nurses/:id", updateNurse);
-//Cambiar estado
+
+// Cambiar estado del doctor
 router.patch("/doctors/state/:id", changeDoctorState);
+
+// ==================== Enfermeros ====================
+
+// Registrar nueva enfermera
+router.post("/nurses", registerNurse);
+
+// Obtener enfermero por ID
+router.get("/nurses/:id", getNurseById);
+
+// Actualizar enfermero
+router.put("/nurses/:id", updateNurse);
+
+// Cambiar estado del enfermero
 router.patch("/nurses/state/:id", changeNurseState);
 
-router.post("/upload-users", upload.single("file"), uploadUsers);
-router.post("/create",createUser)
-router.get("/all", getAllUsers);
-router.patch("/status/:id", updateUserStatus);
-router.get("/:id", getUserById)
+
+
 export default router;

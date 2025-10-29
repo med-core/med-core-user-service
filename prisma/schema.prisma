@@ -21,8 +21,8 @@ model Users {
   role                Role      @default(PACIENTE)
   current_password    String
   status              String    @default("PENDING")
-  specialization      String?
-  department          String?
+  departmentId        String?   @db.ObjectId
+  specializationId    String?   @db.ObjectId
   license_number      String?
   phone               String?
   date_of_birth       DateTime?

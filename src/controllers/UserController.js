@@ -3,30 +3,32 @@ import csv from "csv-parser";
 import bcrypt from "bcrypt";
 import { getPrismaClient } from "../config/database.js";
 import { PrismaClient } from "@prisma/client";
-import axios from "axios"
+import axios from "axios";
+
 const prisma = new PrismaClient();
-// Normalizador de roles
+
+const DEPARTMENT_SERVICE_URL = process.env.DEPARTMENT_SERVICE_URL || "http://med-core-department-service:3000";
+const SPECIALIZATION_SERVICE_URL = process.env.SPECIALIZATION_SERVICE_URL || "http://med-core-specialization-service:3000";
+const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || "http://med-core-auth-service:3000";
+
+// ==================== Normalizador de roles ====================
 function normalizeRole(role) {
   if (!role) return "PACIENTE";
   const r = role.toString().trim().toLowerCase();
   if (r.includes("admin")) return "ADMINISTRADOR";
-  if (r.includes("medic")) return "MEDICO";
+  if (r.includes("medic") || r.includes("doctor")) return "MEDICO";
   if (r.includes("enfermer")) return "ENFERMERO";
   return "PACIENTE";
 }
 
-// Obtener todos los usuarios con filtros
+// ==================== Obtener todos los usuarios ====================
 export const getAllUsers = async (req, res) => {
   try {
     const prisma = getPrismaClient();
+    const { role, state, page = 1, limit = 20 } = req.query;
 
-    // Extraer los filtros
-    const { role, specialty, specialization, state, page = 1, limit = 20 } = req.query;
-
-    // Crear el filtro dinámico
     const where = {};
 
-    // Filtro por rol (doctor/nurse/patient)
     if (role) {
       const normalizedRole = role.toUpperCase();
       if (["MEDICO", "ENFERMERO", "PACIENTE", "ADMINISTRADOR"].includes(normalizedRole)) {
@@ -34,7 +36,6 @@ export const getAllUsers = async (req, res) => {
       }
     }
 
-    // Filtro por estado (active|inactive|pending)
     if (state) {
       const normalizedState = state.toUpperCase();
       if (["ACTIVE", "INACTIVE", "PENDING"].includes(normalizedState)) {
@@ -42,17 +43,9 @@ export const getAllUsers = async (req, res) => {
       }
     }
 
-    // Filtro por especialidad (medicos)
-    const specialtyFilter = specialty || specialization;
-    if (specialtyFilter) {
-      where.specialization = { contains: specialtyFilter, mode: "insensitive" };
-      where.role = "MEDICO"; // fuerza solo médicos
-    }
-    // Paginación
     const take = parseInt(limit) || 20;
     const skip = (parseInt(page) - 1) * take;
 
-    // Consultamos los usuarios filtrados
     const [users, total] = await Promise.all([
       prisma.users.findMany({
         where,
@@ -64,27 +57,43 @@ export const getAllUsers = async (req, res) => {
     ]);
 
     const totalPages = Math.ceil(total / take);
-
-    res.json({
-      total,
-      totalPages,
-      currentPage: parseInt(page),
-      perPage: take,
-      users,
-    });
+    res.json({ total, totalPages, currentPage: parseInt(page), perPage: take, users });
   } catch (err) {
     console.error("Error al obtener usuarios:", err);
     res.status(500).json({ message: "Error al obtener usuarios" });
   }
 };
 
-//=================================CREAR USUARIO==================================
-
+// ==================== Crear usuario ====================
 export const createUser = async (req, res) => {
   const prisma = getPrismaClient();
-
   try {
-    const { email, fullname, role, status, identificacion, current_password } = req.body;
+    const {
+      email,
+      fullname,
+      role,
+      status,
+      identificacion,
+      current_password,
+      departmentId,
+      specializationId,
+    } = req.body;
+
+    if (departmentId) {
+      try {
+        await axios.get(`${DEPARTMENT_SERVICE_URL}/departments/${departmentId}`);
+      } catch {
+        return res.status(400).json({ message: "Departamento no encontrado" });
+      }
+    }
+
+    if (specializationId) {
+      try {
+        await axios.get(`${SPECIALIZATION_SERVICE_URL}/specializations/${specializationId}`);
+      } catch {
+        return res.status(400).json({ message: "Especialización no encontrada" });
+      }
+    }
 
     const hashedPassword = await bcrypt.hash(current_password, 10);
 
@@ -96,6 +105,8 @@ export const createUser = async (req, res) => {
         status: status || "PENDING",
         identificacion: identificacion || null,
         current_password: hashedPassword,
+        departmentId: departmentId || null,
+        specializationId: specializationId || null,
       },
     });
 
@@ -106,20 +117,16 @@ export const createUser = async (req, res) => {
   }
 };
 
-// ================= Carga masiva con integración Auth =================
+// ==================== Carga masiva ====================
 export const uploadUsers = async (req, res) => {
   if (!req.file) return res.status(400).json({ message: "No se subió ningún archivo" });
-
-  if (req.file.size > 60 * 1024 * 1024) {
+  if (req.file.size > 60 * 1024 * 1024)
     return res.status(400).json({ message: "El archivo supera el límite de 60MB" });
-  }
 
   const results = [];
 
   try {
-    // Leer CSV directamente del buffer
     const stream = Readable.from(req.file.buffer);
-
     stream
       .pipe(csv({ separator: ",", quote: '"' }))
       .on("data", (data) => {
@@ -127,58 +134,102 @@ export const uploadUsers = async (req, res) => {
         results.push(data);
       })
       .on("end", async () => {
-        let inserted = 0;
-        let duplicates = 0;
-        let errors = 0;
+        let inserted = 0,
+          duplicates = 0,
+          errors = 0,
+          authFails = 0;
 
         for (const user of results) {
           try {
-            // Verificar duplicado en User Service
-            const existing = await prisma.users.findUnique({
-              where: { email: user.email.toLowerCase().trim() },
-            });
+            const email = user.email.trim().toLowerCase();
+            const fullname = user.fullname.trim();
+            const role = normalizeRole(user.role);
+            const status = user.status?.trim().toUpperCase();
+            const password = user.current_password;
 
+            // Verificar duplicados locales
+            const existing = await prisma.users.findUnique({ where: { email } });
             if (existing) {
               duplicates++;
               continue;
             }
-            // Crear usuario en Auth Service
-            const authResp = await axios.post("http://med-core-auth-service:3000/api/v1/auth/bulk-sign-up", {
-              users: [
-                {
-                  email: user.email.trim().toLowerCase(),
-                  current_password: user.current_password,
-                  fullname: user.fullname.trim(),
-                  role: normalizeRole(user.role),
-                  isEmailVerified: true,
-                }
-              ]
-            });
 
-            const authUserId = authResp.data.user.id;
+            // ==========================================
+            // Buscar o crear DEPARTMENT
+            // ==========================================
+            const deptName = user.department ? user.department.trim() : null;
+            let departmentId = null;
 
-            // Hashear password para User Service
-            const hashedPassword = await bcrypt.hash(user.current_password, 10);
+            if (deptName) {
+              try {
+                const deptResponse = await axios.post(
+                  `${DEPARTMENT_SERVICE_URL}/api/v1/departments/find-or-create`,
+                  { name: deptName }
+                );
+                departmentId = deptResponse.data?.id;
+              } catch (err) {
+                console.error(`No se pudo vincular department para ${email}:`, err.message);
+              }
+            }
 
-            // Crear usuario en User Service (Prisma)
-            await prisma.users.create({
+            // ==========================================
+            // Buscar o crear SPECIALIZATION y asociarla al DEPARTMENT
+            // ==========================================
+            const specName = user.specialization ? user.specialization.trim() : null;
+            let specializationId = null;
+
+            if (specName && departmentId) {
+              try {
+                const specResponse = await axios.post(
+                  `${SPECIALIZATION_SERVICE_URL}/api/v1/specializations/find-or-create`,
+                  {
+                    name: specName,
+                    departmentId,
+                  }
+                );
+                specializationId = specResponse.data?.id;
+              } catch (err) {
+                console.error(`No se pudo vincular specialization para ${email}:`, err.message);
+              }
+            }
+
+            // ==========================================
+            // Crear usuario local en Users
+            // ==========================================
+            const hashedPassword = await bcrypt.hash(password, 10);
+            const newUser = await prisma.users.create({
               data: {
-                email: user.email.trim().toLowerCase(),
-                fullname: user.fullname.trim(),
-                role: normalizeRole(user.role),
+                email,
+                fullname,
+                role,
                 current_password: hashedPassword,
-                status: user.status?.trim() || "PENDING",
-                specialization: user.specialization?.trim() || null,
-                department: user.department?.trim() || null,
+                status,
+                departmentId,
+                specializationId,
                 license_number: user.license_number?.trim() || null,
                 phone: user.phone?.trim() || null,
                 date_of_birth: user.date_of_birth ? new Date(user.date_of_birth) : null,
-                identificacion: user.identificacion?.trim() || null,
-                authId: authUserId, // Guardamos el ID del Auth Service
               },
             });
-
             inserted++;
+
+            // ==========================================
+            // Crear registro en Auth con userId
+            // ==========================================
+            try {
+              await axios.post(`${AUTH_SERVICE_URL}/api/v1/auth/bulk-sign-up`, {
+                email,
+                fullname,
+                password,
+                role,
+                verified: true,
+                userId: newUser.id, // <--- Aquí va el userId
+              });
+            } catch (authErr) {
+              console.error(`Error al crear en AuthService para ${email}:`, authErr.message);
+              authFails++;
+            }
+
           } catch (err) {
             console.error(`Error con ${user.email}:`, err.message);
             errors++;
@@ -191,6 +242,7 @@ export const uploadUsers = async (req, res) => {
           insertados: inserted,
           duplicados: duplicates,
           errores: errors,
+          auth_fails: authFails,
         });
       });
   } catch (error) {
@@ -198,6 +250,69 @@ export const uploadUsers = async (req, res) => {
     return res.status(500).json({ message: "Error al procesar el archivo" });
   }
 };
+
+// ==================== Obtener usuario por ID ====================
+export const getUserById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await prisma.users.findUnique({ where: { id } });
+    if (!user) return res.status(404).json({ message: "Usuario no encontrado" });
+
+    const [department, specialization] = await Promise.all([
+      user.departmentId
+        ? axios.get(`${DEPARTMENT_SERVICE_URL}/departments/${user.departmentId}`).then(res => res.data).catch(() => null)
+        : null,
+      user.specializationId
+        ? axios.get(`${SPECIALIZATION_SERVICE_URL}/specializations/${user.specializationId}`).then(res => res.data).catch(() => null)
+        : null,
+    ]);
+
+    return res.status(200).json({
+      ...user,
+      department,
+      specialization,
+    });
+  } catch (error) {
+    console.error("Error al obtener usuario por ID:", error);
+    return res.status(500).json({ message: "Error interno del servidor" });
+  }
+};
+
+// ==================== Actualizar usuario ====================
+export const updateUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = req.body;
+
+    if (data.departmentId) {
+      try {
+        await axios.get(`${DEPARTMENT_SERVICE_URL}/departments/${data.departmentId}`);
+      } catch {
+        return res.status(400).json({ message: "Departamento no encontrado" });
+      }
+    }
+
+    if (data.specializationId) {
+      try {
+        await axios.get(`${SPECIALIZATION_SERVICE_URL}/specializations/${data.specializationId}`);
+      } catch {
+        return res.status(400).json({ message: "Especialización no encontrada" });
+      }
+    }
+
+    const updatedUser = await prisma.users.update({
+      where: { id },
+      data,
+    });
+
+    return res.status(200).json({ message: "Usuario actualizado", user: updatedUser });
+  } catch (error) {
+    console.error("Error actualizando usuario:", error);
+    return res.status(500).json({ message: "Error interno del servidor" });
+  }
+};
+
+// ==================== Cambiar estado ====================
 export const updateUserStatus = async (req, res) => {
   try {
     const { id } = req.params;
@@ -214,232 +329,210 @@ export const updateUserStatus = async (req, res) => {
     return res.status(500).json({ message: "Error interno del servidor" });
   }
 };
-// Obtener un usuario por ID
-export const getUserById = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const user = await prisma.users.findUnique({ where: { id } });
 
-    if (!user) return res.status(404).json({ message: "Usuario no encontrado" });
-
-    return res.status(200).json({
-      id: user.id,
-      email: user.email,
-      fullname: user.fullname,
-      status: user.status,
-      role: user.role,
-    });
-  } catch (error) {
-    console.error("Error al obtener usuario por ID:", error);
-    return res.status(500).json({ message: "Error interno del servidor" });
-  }
-};
-
-// ==================== DOCTORES ====================
-
-// Registrar un doctor
+// ==================== Registro de doctor ====================
 export const registerDoctor = async (req, res) => {
   try {
-    const prisma = getPrismaClient();
-    const { fullname, email, department, specialization, license_number, phone } = req.body;
+    const data = req.body;
+    data.role = "MEDICO";
 
-    if (!email || !fullname)
-      return res.status(400).json({ message: "Email y nombre completo son requeridos" });
-
-    const existing = await prisma.users.findUnique({ where: { email } });
-    if (existing)
-      return res.status(409).json({ message: "Ya existe un usuario con este correo" });
-
-    const doctor = await prisma.users.create({
+    // Crear usuario local en Users
+    const hashedPassword = await bcrypt.hash(data.current_password, 10);
+    const newUser = await prisma.users.create({
       data: {
-        fullname,
-        email: email.toLowerCase().trim(),
-        department,
-        specialization,
-        license_number,
-        phone,
-        role: "MEDICO",
-        status: "ACTIVE",
-        current_password: await bcrypt.hash("123456", 10), // password por defecto
+        email: data.email.toLowerCase(),
+        fullname: data.fullname,
+        role: data.role,
+        current_password: hashedPassword,
+        status: data.status?.toUpperCase() || "ACTIVE",
+        departmentId: data.departmentId || null,
+        specializationId: data.specializationId || null,
+        license_number: data.license_number || null,
+        phone: data.phone || null,
+        date_of_birth: data.date_of_birth ? new Date(data.date_of_birth) : null,
       },
     });
 
-    res.status(201).json({ message: "Doctor registrado exitosamente", doctor });
+    // Crear usuario en Auth Service
+    try {
+      await axios.post(`${AUTH_SERVICE_URL}/api/v1/auth/bulk-sign-up`, {
+        email: data.email,
+        fullname: data.fullname,
+        password: data.current_password,
+        role: data.role,
+        verified: true,
+        userId: newUser.id, // <-- referencia al usuario local
+      });
+    } catch (authErr) {
+      console.error(`Error al crear en AuthService para ${data.email}:`, authErr.message);
+      return res.status(500).json({ message: "Usuario creado localmente, pero fallo en AuthService" });
+    }
+
+    res.status(201).json({ message: "Doctor registrado correctamente", user: newUser });
+
   } catch (error) {
-    console.error("Error registrando doctor:", error);
-    res.status(500).json({ message: "Error al registrar doctor" });
+    console.error("Error registrando médico:", error);
+    res.status(500).json({ message: "Error registrando médico" });
   }
 };
 
-// Obtener todos los doctores por especialidad
-export const getDoctorsBySpecialty = async (req, res) => {
-  try {
-    const prisma = getPrismaClient();
-    const { specialty } = req.query;
 
-    const where = { role: "MEDICO" };
-    if (specialty) where.specialization = { equals: specialty, mode: "insensitive" };
-
-    const doctors = await prisma.users.findMany({ where });
-    res.json(doctors);
-  } catch (error) {
-    console.error("Error obteniendo doctores:", error);
-    res.status(500).json({ message: "Error al obtener doctores" });
-  }
-};
-
-// Obtener doctor por ID
-export const getDoctorById = async (req, res) => {
-  try {
-    const prisma = getPrismaClient();
-    const doctor = await prisma.users.findUnique({ where: { id: req.params.id } });
-
-    if (!doctor || doctor.role !== "MEDICO")
-      return res.status(404).json({ message: "Doctor no encontrado" });
-
-    res.json(doctor);
-  } catch (error) {
-    console.error("Error al obtener doctor:", error);
-    res.status(500).json({ message: "Error interno del servidor" });
-  }
-};
-
-// Actualizar doctor
-export const updateDoctor = async (req, res) => {
-  try {
-    const prisma = getPrismaClient();
-    const updated = await prisma.users.update({
-      where: { id: req.params.id },
-      data: req.body,
-    });
-    res.json({ message: "Doctor actualizado", updated });
-  } catch (error) {
-    console.error("Error actualizando doctor:", error);
-    res.status(500).json({ message: "Error al actualizar doctor" });
-  }
-};
-
-// Cambiar estado de doctor
-export const changeDoctorState = async (req, res) => {
-  try {
-    const prisma = getPrismaClient();
-    const updated = await prisma.users.update({
-      where: { id: req.params.id },
-      data: { status: req.body.status },
-    });
-    res.json({ message: "Estado del doctor actualizado", updated });
-  } catch (error) {
-    console.error("Error cambiando estado del doctor:", error);
-    res.status(500).json({ message: "Error al cambiar estado del doctor" });
-  }
-};
-
-// ==================== ENFERMEROS ====================
-
-// Registrar un enfermero
+// ==================== Registro de enfermero ====================
+// ==================== Registro de enfermero ====================
 export const registerNurse = async (req, res) => {
   try {
-    const prisma = getPrismaClient();
-    const { fullname, email, department, phone } = req.body;
+    const data = req.body;
+    data.role = "ENFERMERO";
 
-    if (!email || !fullname)
-      return res.status(400).json({ message: "Email y nombre completo son requeridos" });
-
-    const existing = await prisma.users.findUnique({ where: { email } });
-    if (existing)
-      return res.status(409).json({ message: "Ya existe un usuario con este correo" });
-
-    const nurse = await prisma.users.create({
+    // Crear usuario local en Users
+    const hashedPassword = await bcrypt.hash(data.current_password, 10);
+    const newUser = await prisma.users.create({
       data: {
-        fullname,
-        email: email.toLowerCase().trim(),
-        department,
-        phone,
-        role: "ENFERMERO",
-        status: "ACTIVE",
-        current_password: await bcrypt.hash("123456", 10),
+        email: data.email.toLowerCase(),
+        fullname: data.fullname,
+        role: data.role,
+        current_password: hashedPassword,
+        status: data.status?.toUpperCase() || "ACTIVE",
+        departmentId: data.departmentId || null,
+        specializationId: data.specializationId || null,
+        license_number: data.license_number || null,
+        phone: data.phone || null,
+        date_of_birth: data.date_of_birth ? new Date(data.date_of_birth) : null,
       },
     });
 
-    res.status(201).json({ message: "Enfermero registrado exitosamente", nurse });
+    // Crear usuario en Auth Service
+    try {
+      await axios.post(`${AUTH_SERVICE_URL}/api/v1/auth/bulk-sign-up`, {
+        email: data.email,
+        fullname: data.fullname,
+        password: data.current_password,
+        role: data.role,
+        verified: true,
+        userId: newUser.id, // referencia al usuario local
+      });
+    } catch (authErr) {
+      console.error(`Error al crear en AuthService para ${data.email}:`, authErr.message);
+      return res.status(500).json({ message: "Usuario creado localmente, pero fallo en AuthService" });
+    }
+
+    res.status(201).json({ message: "Enfermero registrado correctamente", user: newUser });
+
   } catch (error) {
     console.error("Error registrando enfermero:", error);
-    res.status(500).json({ message: "Error al registrar enfermero" });
+    res.status(500).json({ message: "Error registrando enfermero" });
   }
 };
 
-// Obtener enfermero por ID
+
+// ==================== Obtener doctor por ID ====================
+export const getDoctorById = async (req, res) => {
+  req.params.role = "MEDICO";
+  return getUserById(req, res);
+};
+
+// ==================== Obtener enfermero por ID ====================
 export const getNurseById = async (req, res) => {
-  try {
-    const prisma = getPrismaClient();
-    const nurse = await prisma.users.findUnique({ where: { id: req.params.id } });
-
-    if (!nurse || nurse.role !== "ENFERMERO")
-      return res.status(404).json({ message: "Enfermero no encontrado" });
-
-    res.json(nurse);
-  } catch (error) {
-    console.error("Error al obtener enfermero:", error);
-    res.status(500).json({ message: "Error interno del servidor" });
-  }
+  req.params.role = "ENFERMERO";
+  return getUserById(req, res);
 };
 
-// Actualizar enfermero
+// ==================== Actualizar doctor ====================
+export const updateDoctor = async (req, res) => {
+  req.body.role = "MEDICO";
+  return updateUser(req, res);
+};
+
+// ==================== Actualizar enfermero ====================
 export const updateNurse = async (req, res) => {
-  try {
-    const prisma = getPrismaClient();
-    const updated = await prisma.users.update({
-      where: { id: req.params.id },
-      data: req.body,
-    });
-    res.json({ message: "Enfermero actualizado", updated });
-  } catch (error) {
-    console.error("Error actualizando enfermero:", error);
-    res.status(500).json({ message: "Error al actualizar enfermero" });
-  }
+  req.body.role = "ENFERMERO";
+  return updateUser(req, res);
 };
 
-// Cambiar estado enfermero
+// ==================== Cambiar estado doctor ====================
+export const changeDoctorState = async (req, res) => {
+  return updateUserStatus(req, res);
+};
+
+// ==================== Cambiar estado enfermero ====================
 export const changeNurseState = async (req, res) => {
-  try {
-    const prisma = getPrismaClient();
-    const updated = await prisma.users.update({
-      where: { id: req.params.id },
-      data: { status: req.body.status },
-    });
-    res.json({ message: "Estado del enfermero actualizado", updated });
-  } catch (error) {
-    console.error("Error cambiando estado del enfermero:", error);
-    res.status(500).json({ message: "Error al cambiar estado del enfermero" });
-  }
+  return updateUserStatus(req, res);
 };
 
-// ==================== FILTRO POR ROL ====================
+// ==================== Filtrar usuarios por rol ====================
 export const getUsersByRole = async (req, res) => {
   try {
-    const prisma = getPrismaClient();
     const { role } = req.query;
-
-    if (!role) {
-      return res.status(400).json({ message: "Debe especificar un rol" });
-    }
-
-    // Normalizar el rol a mayúsculas
-    const normalizedRole = role.toUpperCase();
-
-    // Validamos que sea un rol permitido
-    const validRoles = ["ADMINISTRADOR", "MEDICO", "ENFERMERO", "PACIENTE"];
-    if (!validRoles.includes(normalizedRole)) {
-      return res.status(400).json({ message: "Rol no válido" });
-    }
-
     const users = await prisma.users.findMany({
-      where: { role: normalizedRole },
+      where: { role: role?.toUpperCase() },
+      orderBy: { fullname: "asc" },
     });
-
     res.json(users);
   } catch (error) {
     console.error("Error filtrando usuarios por rol:", error);
-    res.status(500).json({ message: "Error al filtrar usuarios" });
+    res.status(500).json({ message: "Error interno del servidor" });
   }
 };
+
+// ==================== Filtrar doctores por especialidad ====================
+export const getDoctorsBySpecialty = async (req, res) => {
+  try {
+    const { specialty } = req.query;
+    if (!specialty) return res.status(400).json({ message: "Debe proporcionar el nombre de la especialidad" });
+
+    // ==========================================
+    // 1. Consultar specialization-service
+    // ==========================================
+    let specialization;
+    try {
+      const specResponse = await axios.get(`${SPECIALIZATION_SERVICE_URL}/api/v1/specializations?name=${encodeURIComponent(specialty)}`);
+      if (Array.isArray(specResponse.data) && specResponse.data.length > 0) {
+        specialization = specResponse.data[0];
+      }
+    } catch (err) {
+      console.error("Error consultando specialization-service:", err.message);
+      return res.status(502).json({ message: "Error al consultar el servicio de especializaciones" });
+    }
+
+    if (!specialization) return res.status(404).json({ message: `Especialidad "${specialty}" no encontrada` });
+
+    // ==========================================
+    // 2. Consultar usuarios (solo médicos) con esa specializationId
+    // ==========================================
+    let doctors = [];
+    try {
+      doctors = await prisma.users.findMany({
+        where: {
+          role: "MEDICO",
+          specializationId: specialization.id,
+        },
+        orderBy: { fullname: "asc" },
+        select: {
+          id: true,
+          email: true,
+          fullname: true,
+          departmentId: true,
+          specializationId: true,
+          phone: true,
+          license_number: true,
+        },
+      });
+    } catch (err) {
+      console.error("Error consultando base de usuarios:", err.message);
+      return res.status(500).json({ message: "Error al obtener los doctores de la base de datos" });
+    }
+
+    // ==========================================
+    // 3. Responder con la lista de doctores
+    // ==========================================
+    res.json(doctors);
+
+  } catch (error) {
+    console.error("Error inesperado:", error.message);
+    res.status(500).json({ message: "Error interno del servidor" });
+  }
+};
+
+
+
+
