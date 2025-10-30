@@ -533,6 +533,41 @@ export const getDoctorsBySpecialty = async (req, res) => {
   }
 };
 
+export const getBulkUsers = async (req, res) => {
+  try {
+    const { userIds } = req.body;
+    console.log("user-service: bulk request for IDs:", userIds);
+
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({ message: "userIds debe ser un array" });
+    }
+
+    const prisma = getPrismaClient(); // ← tu función
+
+    const users = await prisma.users.findMany({
+      where: {
+        id: { in: userIds },
+        role: "PACIENTE",
+      },
+      select: {
+        id: true,
+        email: true,
+        fullname: true,
+        role: true,
+        phone: true,
+        identificacion: true,
+      },
+    });
+
+    console.log("user-service: usuarios encontrados:", users.length);
+
+    res.json({ data: users });
+  } catch (err) {
+    console.error("Error en bulk users:", err);
+    res.status(500).json({ message: "Error interno" });
+  }
+};
+
 
 
 

@@ -24,6 +24,7 @@ import {
 
   // Filtros generales
   getUsersByRole,
+  getBulkUsers
 } from "../controllers/UserController.js";
 
 const router = express.Router();
@@ -43,7 +44,7 @@ const upload = multer({
   limits: { fileSize: 60 * 1024 * 1024 }, // 60MB
 });
 // ==================== Filtros generales ====================
-
+router.post("/bulk", getBulkUsers);
 // Filtrar usuarios por rol (MÉDICO, ENFERMERO, PACIENTE, etc.)
 router.get("/by-role", getUsersByRole);
 // ==================== Usuarios genéricos ====================
