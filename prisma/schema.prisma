@@ -1,11 +1,5 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
   binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
@@ -13,30 +7,24 @@ datasource db {
   provider = "mongodb"
   url      = env("DATABASE_URL")
 }
+
 model Users {
-  id                  String    @id @default(auto()) @map("_id") @db.ObjectId
-  email               String    @unique
-  fullname            String
-  identificacion      String?   @unique
-  role                Role      @default(PACIENTE)
-  current_password    String
-  status              String    @default("PENDING")
-  departmentId        String?   @db.ObjectId
-  specializationId    String?   @db.ObjectId
-  license_number      String?
-  phone               String?
-  date_of_birth       DateTime?
-  verificationCode    String?
-  verificationExpires DateTime?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  email      String   @unique
+  fullname   String
+  role       Role     @default(PACIENTE)
+  status     UserStatus @default(PENDING)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("Users")
 }
 
 enum Role {
-  ENFERMERO
-  MEDICO
-  ADMINISTRADOR
   PACIENTE
+  MEDICO
+  ENFERMERO
+  ADMINISTRADOR
 }
 
 enum UserStatus {
@@ -44,4 +32,3 @@ enum UserStatus {
   ACTIVE
   INACTIVE
 }
-
