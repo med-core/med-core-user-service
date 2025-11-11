@@ -124,131 +124,162 @@ export const uploadUsers = async (req, res) => {
     return res.status(400).json({ message: "El archivo supera el límite de 60MB" });
 
   const results = [];
+  const buffer = req.file.buffer;
+  const stream = Readable.from(buffer);
 
-  try {
-    const stream = Readable.from(req.file.buffer);
-    stream
-      .pipe(csv({ separator: ",", quote: '"' }))
-      .on("data", (data) => {
-        if (!data.email || !data.fullname || !data.current_password) return;
-        results.push(data);
-      })
-      .on("end", async () => {
-        let inserted = 0,
-          duplicates = 0,
-          errors = 0,
-          authFails = 0;
+  stream
+    .pipe(csv({ separator: ',', headers: true }))
+    .on('data', (row) => {
+      if (row.email && row.fullname) results.push(row);
+    })
+    .on('end', async () => {
+      let stats = {
+        total: results.length,
+        users: 0,
+        auth: 0,
+        patients: 0,
+        doctors: 0,
+        nurses: 0,
+        duplicates: 0,
+        errors: [],
+      };
 
-        for (const user of results) {
-          try {
-            const email = user.email.trim().toLowerCase();
-            const fullname = user.fullname.trim();
-            const role = normalizeRole(user.role);
-            const status = user.status?.trim().toUpperCase();
-            const password = user.current_password;
+      for (const row of results) {
+        const email = row.email.trim().toLowerCase();
+        const fullname = row.fullname.trim();
+        const role = normalizeRole(row.role);
+        const password = row.current_password || row.password || 'Temp1234!';
 
-            // Verificar duplicados locales
-            const existing = await prisma.users.findUnique({ where: { email } });
-            if (existing) {
-              duplicates++;
-              continue;
-            }
-
-            // ==========================================
-            // Buscar o crear DEPARTMENT
-            // ==========================================
-            const deptName = user.department ? user.department.trim() : null;
-            let departmentId = null;
-
-            if (deptName) {
-              try {
-                const deptResponse = await axios.post(
-                  `${DEPARTMENT_SERVICE_URL}/api/v1/departments/find-or-create`,
-                  { name: deptName }
-                );
-                departmentId = deptResponse.data?.id;
-              } catch (err) {
-                console.error(`No se pudo vincular department para ${email}:`, err.message);
-              }
-            }
-
-            // ==========================================
-            // Buscar o crear SPECIALIZATION y asociarla al DEPARTMENT
-            // ==========================================
-            const specName = user.specialization ? user.specialization.trim() : null;
-            let specializationId = null;
-
-            if (specName && departmentId) {
-              try {
-                const specResponse = await axios.post(
-                  `${SPECIALIZATION_SERVICE_URL}/api/v1/specializations/find-or-create`,
-                  {
-                    name: specName,
-                    departmentId,
-                  }
-                );
-                specializationId = specResponse.data?.id;
-              } catch (err) {
-                console.error(`No se pudo vincular specialization para ${email}:`, err.message);
-              }
-            }
-
-            // ==========================================
-            // Crear usuario local en Users
-            // ==========================================
-            const hashedPassword = await bcrypt.hash(password, 10);
-            const newUser = await prisma.users.create({
-              data: {
-                email,
-                fullname,
-                role,
-                current_password: hashedPassword,
-                status,
-                departmentId,
-                specializationId,
-                license_number: user.license_number?.trim() || null,
-                phone: user.phone?.trim() || null,
-                date_of_birth: user.date_of_birth ? new Date(user.date_of_birth) : null,
-              },
-            });
-            inserted++;
-
-            // ==========================================
-            // Crear registro en Auth con userId
-            // ==========================================
-            try {
-              await axios.post(`${AUTH_SERVICE_URL}/api/v1/auth/bulk-sign-up`, {
-                email,
-                fullname,
-                password,
-                role,
-                verified: true,
-                userId: newUser.id, // <--- Aquí va el userId
-              });
-            } catch (authErr) {
-              console.error(`Error al crear en AuthService para ${email}:`, authErr.message);
-              authFails++;
-            }
-
-          } catch (err) {
-            console.error(`Error con ${user.email}:`, err.message);
-            errors++;
+        try {
+          // 1. Verificar duplicado en Users
+          const existingUser = await prisma.users.findUnique({ where: { email } });
+          if (existingUser) {
+            stats.duplicates++;
+            stats.errors.push({ email, error: 'Email ya existe en Users' });
+            continue;
           }
-        }
 
-        return res.json({
-          message: "Carga masiva completada",
-          total: results.length,
-          insertados: inserted,
-          duplicados: duplicates,
-          errores: errors,
-          auth_fails: authFails,
-        });
+          // 2. Crear o buscar departamento
+          let departmentId = null;
+          if (row.department) {
+            try {
+              const deptRes = await axios.post(`${DEPARTMENT_SERVICE_URL}/api/v1/departments/find-or-create`, {
+                name: row.department.trim(),
+              });
+              departmentId = deptRes.data.id;
+            } catch (err) {
+              stats.errors.push({ email, error: 'Departamento no creado' });
+            }
+          }
+
+          // 3. Crear o buscar especialización
+          let specializationId = null;
+          if (row.specialization && departmentId) {
+            try {
+              const specRes = await axios.post(`${SPECIALIZATION_SERVICE_URL}/api/v1/specializations/find-or-create`, {
+                name: row.specialization.trim(),
+                departmentId,
+              });
+              specializationId = specRes.data.id;
+            } catch (err) {
+              stats.errors.push({ email, error: 'Especialización no creada' });
+            }
+          }
+
+          // 4. Crear usuario en User Service
+          const hashedPassword = await bcrypt.hash(password, 10);
+          const newUser = await prisma.users.create({
+            data: {
+              email,
+              fullname,
+              role,
+              current_password: hashedPassword,
+              status: row.status?.trim().toUpperCase() === 'ACTIVE' ? 'ACTIVE' : 'PENDING',
+              departmentId,
+              specializationId,
+              license_number: row.license_number?.trim() || null,
+              phone: row.phone?.trim() || null,
+              date_of_birth: row.date_of_birth ? new Date(row.date_of_birth) : null,
+            },
+          });
+
+          stats.users++;
+
+          // 5. Crear en Auth Service
+          try {
+            await axios.post(`${AUTH_SERVICE_URL}/api/v1/auth/bulk-sign-up`, {
+              userId: newUser.id,
+              email,
+              password,
+              verified: true,
+            });
+            stats.auth++;
+          } catch (err) {
+            stats.errors.push({ email, error: 'Fallo en Auth: ' + (err.response?.data?.message || err.message) });
+          }
+
+          // 6. Crear perfil según rol
+          if (role === 'PACIENTE') {
+            try {
+              await axios.post(`${PATIENT_SERVICE_URL}/api/v1/patients/bulk`, {
+                userId: newUser.id,
+                documentNumber: row.documentNumber || `TEMP-${Date.now()}`,
+                birthDate: row.date_of_birth ? new Date(row.date_of_birth) : null,
+                age: row.age ? parseInt(row.age) : null,
+                gender: row.gender || 'OTRO',
+                phone: row.phone || null,
+                address: row.address || null,
+              });
+              stats.patients++;
+            } catch (err) {
+              stats.errors.push({ email, error: 'Fallo en Patient Service' });
+            }
+          }
+
+          if (role === 'MEDICO') {
+            try {
+              await axios.post(`${DOCTOR_SERVICE_URL}/api/v1/doctors/bulk`, {
+                userId: newUser.id,
+                licenseNumber: row.license_number || `LIC-${Date.now()}`,
+                specializationId,
+                departmentId,
+                consultationTime: 30,
+                availableFrom: '08:00',
+                availableTo: '17:00',
+              });
+              stats.doctors++;
+            } catch (err) {
+              stats.errors.push({ email, error: 'Fallo en Doctor Service' });
+            }
+          }
+
+          if (role === 'ENFERMERO') {
+            try {
+              await axios.post(`${NURSE_SERVICE_URL}/api/v1/nurses/bulk`, {
+                userId: newUser.id,
+                departmentId,
+                shift: row.shift?.toLowerCase() || 'morning',
+              });
+              stats.nurses++;
+            } catch (err) {
+              stats.errors.push({ email, error: 'Fallo en Nurse Service' });
+            }
+          }
+
+        } catch (err) {
+          stats.errors.push({ email, error: err.message });
+        }
+      }
+
+      res.status(200).json({
+        message: 'Carga masiva completada',
+        stats,
       });
-  } catch (error) {
-    console.error("Error al procesar el archivo:", error);
-    return res.status(500).json({ message: "Error al procesar el archivo" });
-  }
+    })
+    .on('error', (err) => {
+      console.error('Error parsing CSV:', err);
+      res.status(500).json({ message: 'Error al procesar CSV' });
+    });
 };
 
 // ==================== Obtener usuario por ID ====================
@@ -376,8 +407,6 @@ export const registerDoctor = async (req, res) => {
   }
 };
 
-
-// ==================== Registro de enfermero ====================
 // ==================== Registro de enfermero ====================
 export const registerNurse = async (req, res) => {
   try {
