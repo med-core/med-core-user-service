@@ -2,14 +2,14 @@ import { Readable } from "stream";
 import csv from "csv-parser";
 import bcrypt from "bcrypt";
 import { getPrismaClient } from "../config/database.js";
-import { PrismaClient } from "@prisma/client";
 import axios from "axios";
-
-const prisma = new PrismaClient();
 
 const DEPARTMENT_SERVICE_URL = process.env.DEPARTMENT_SERVICE_URL || "http://med-core-department-service:3000";
 const SPECIALIZATION_SERVICE_URL = process.env.SPECIALIZATION_SERVICE_URL || "http://med-core-specialization-service:3000";
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || "http://med-core-auth-service:3000";
+const PATIENT_SERVICE_URL = process.env.PATIENT_SERVICE_URL || "http://med-core-patient-service:3000";
+const DOCTOR_SERVICE_URL = process.env.DOCTOR_SERVICE_URL || "http://med-core-doctor-service:3000";
+const NURSE_SERVICE_URL = process.env.NURSE_SERVICE_URL || "http://med-core-nurse-service:3000";
 
 // ==================== Normalizador de roles ====================
 function normalizeRole(role) {
@@ -125,14 +125,30 @@ export const uploadUsers = async (req, res) => {
 
   const results = [];
   const buffer = req.file.buffer;
-  const stream = Readable.from(buffer);
+  const csvString = buffer.toString('utf-8').replace(/^\uFEFF/, '');
+  const stream = Readable.from(csvString);
+
+  // Detección de separador
+  let separator = ',';
+  if (csvString.split('\n')[0].includes(';')) {
+    separator = ';';
+  }
+  console.log(`Iniciando procesamiento CSV con separador: "${separator}"`);
 
   stream
-    .pipe(csv({ separator: ',', headers: true }))
+    .pipe(csv({
+      separator: separator,
+      // Limpia encabezados
+      mapHeaders: ({ header }) => header.trim().toLowerCase().replace(/[^a-z0-9_]/g, '')
+    }))
     .on('data', (row) => {
-      if (row.email && row.fullname) results.push(row);
+      if (row.email && row.fullname) {
+        results.push(row);
+      }
     })
     .on('end', async () => {
+      const prisma = getPrismaClient();
+
       let stats = {
         total: results.length,
         users: 0,
@@ -145,21 +161,23 @@ export const uploadUsers = async (req, res) => {
       };
 
       for (const row of results) {
-        const email = row.email.trim().toLowerCase();
-        const fullname = row.fullname.trim();
+        console.log(`Iniciando procesamiento de la fila para: ${row.email}. Rol: ${row.role}`);
+        const email = row.email?.trim().toLowerCase();
+        const fullname = row.fullname?.trim();
         const role = normalizeRole(row.role);
         const password = row.current_password || row.password || 'Temp1234!';
+        let newUser = null;
 
         try {
-          // 1. Verificar duplicado en Users
           const existingUser = await prisma.users.findUnique({ where: { email } });
           if (existingUser) {
+            console.log(`Email duplicado encontrado: ${email}. Saltando.`);
             stats.duplicates++;
             stats.errors.push({ email, error: 'Email ya existe en Users' });
             continue;
           }
 
-          // 2. Crear o buscar departamento
+          // 2 Crear departamento (si existe)
           let departmentId = null;
           if (row.department) {
             try {
@@ -167,12 +185,12 @@ export const uploadUsers = async (req, res) => {
                 name: row.department.trim(),
               });
               departmentId = deptRes.data.id;
-            } catch (err) {
-              stats.errors.push({ email, error: 'Departamento no creado' });
+            } catch (deptErr) {
+              stats.errors.push({ email, error: `Departamento no creado: ${deptErr.message}` });
             }
           }
 
-          // 3. Crear o buscar especialización
+          // 3 Crear especialización (si aplica)
           let specializationId = null;
           if (row.specialization && departmentId) {
             try {
@@ -181,46 +199,62 @@ export const uploadUsers = async (req, res) => {
                 departmentId,
               });
               specializationId = specRes.data.id;
-            } catch (err) {
-              stats.errors.push({ email, error: 'Especialización no creada' });
+            } catch (specErr) {
+              stats.errors.push({ email, error: `Especialización no creada: ${specErr.message}` });
             }
           }
 
-          // 4. Crear usuario en User Service
+          // 4 Crear usuario localmente (primero)
           const hashedPassword = await bcrypt.hash(password, 10);
-          const newUser = await prisma.users.create({
+          newUser = await prisma.users.create({
             data: {
               email,
               fullname,
               role,
               current_password: hashedPassword,
-              status: row.status?.trim().toUpperCase() === 'ACTIVE' ? 'ACTIVE' : 'PENDING',
+              status: row.status?.trim().toUpperCase() || 'PENDING',
               departmentId,
               specializationId,
               license_number: row.license_number?.trim() || null,
               phone: row.phone?.trim() || null,
               date_of_birth: row.date_of_birth ? new Date(row.date_of_birth) : null,
+              identificacion: row.identificacion?.trim() || null,
             },
           });
-
           stats.users++;
+          console.log(`Usuario creado en DB: ${email} (ID: ${newUser.id})`);
 
-          // 5. Crear en Auth Service
+          // 5 Crear en Auth
           try {
             await axios.post(`${AUTH_SERVICE_URL}/api/v1/auth/bulk-sign-up`, {
               userId: newUser.id,
               email,
+              fullname,
               password,
+              role,
               verified: true,
             });
             stats.auth++;
-          } catch (err) {
-            stats.errors.push({ email, error: 'Fallo en Auth: ' + (err.response?.data?.message || err.message) });
+            console.log(`Auth creado para: ${email}`);
+          } catch (authErr) {
+            console.error(`Fallo crítico en Auth para ${email}. Rollback de User.`);
+
+            if (authErr.response) {
+              console.error(`Status: ${authErr.response.status}, Data:`, authErr.response.data);
+            } else {
+              console.error(`Mensaje de error Axios:`, authErr.message);
+            }
+
+            // Rollback
+            await prisma.users.delete({ where: { id: newUser.id } });
+            stats.users--;
+            stats.errors.push({ email, error: 'Fallo crítico en Auth: Rollback ejecutado.' });
+            continue;
           }
 
-          // 6. Crear perfil según rol
-          if (role === 'PACIENTE') {
-            try {
+          // 6 Crear perfil según rol
+          try {
+            if (role === 'PACIENTE') {
               await axios.post(`${PATIENT_SERVICE_URL}/api/v1/patients/bulk`, {
                 userId: newUser.id,
                 documentNumber: row.documentNumber || `TEMP-${Date.now()}`,
@@ -231,13 +265,7 @@ export const uploadUsers = async (req, res) => {
                 address: row.address || null,
               });
               stats.patients++;
-            } catch (err) {
-              stats.errors.push({ email, error: 'Fallo en Patient Service' });
-            }
-          }
-
-          if (role === 'MEDICO') {
-            try {
+            } else if (role === 'MEDICO') {
               await axios.post(`${DOCTOR_SERVICE_URL}/api/v1/doctors/bulk`, {
                 userId: newUser.id,
                 licenseNumber: row.license_number || `LIC-${Date.now()}`,
@@ -248,44 +276,54 @@ export const uploadUsers = async (req, res) => {
                 availableTo: '17:00',
               });
               stats.doctors++;
-            } catch (err) {
-              stats.errors.push({ email, error: 'Fallo en Doctor Service' });
-            }
-          }
-
-          if (role === 'ENFERMERO') {
-            try {
+            } else if (role === 'ENFERMERO') {
+              console.log(`DEBUG: Intentando crear perfil de Enfermero para ${email} con id: ${newUser.id} en URL: ${NURSE_SERVICE_URL}/api/v1/nurses/bulk`);
               await axios.post(`${NURSE_SERVICE_URL}/api/v1/nurses/bulk`, {
                 userId: newUser.id,
                 departmentId,
                 shift: row.shift?.toLowerCase() || 'morning',
               });
               stats.nurses++;
-            } catch (err) {
-              stats.errors.push({ email, error: 'Fallo en Nurse Service' });
             }
-          }
+          } catch (profileErr) {
+            const errorMessage = profileErr.response
+              ? `Status ${profileErr.response.status}: ${JSON.stringify(profileErr.response.data)}`
+              : profileErr.message; // Mensaje de fallo de conexión
 
+            console.error(`Fallo al crear perfil (${role}) para ${email}:`, errorMessage);
+            stats.errors.push({ email, error: `Fallo al crear perfil (${role}): ${errorMessage}` });
+          }
         } catch (err) {
-          stats.errors.push({ email, error: err.message });
+          // Este catch es para errores inesperados antes de Auth/Profile
+          console.error(`ERROR INESPERADO en fila ${email}:`, err.message);
+          if (err.code && err.code.startsWith('P')) {
+            console.error('Detalle de error de Prisma:', err.meta);
+          }
+          stats.errors.push({ email, error: `Error inesperado: ${err.message}` });
         }
       }
 
+      console.log("Carga masiva completada con", stats.total, "filas procesadas");
       res.status(200).json({
         message: 'Carga masiva completada',
         stats,
       });
     })
     .on('error', (err) => {
-      console.error('Error parsing CSV:', err);
-      res.status(500).json({ message: 'Error al procesar CSV' });
+      console.error('FATAL: Error en la carga masiva. Deteniendo el proceso.');
+      console.error(error);
+      console.error('Error leyendo el CSV:', err.message);
+      // Si hay un error de stream
+      if (!res.headersSent) {
+        return res.status(500).json({ message: 'Error leyendo el archivo CSV', error: err.message });
+      }
     });
 };
-
 // ==================== Obtener usuario por ID ====================
 export const getUserById = async (req, res) => {
   try {
     const { id } = req.params;
+    const prisma = getPrismaClient();
     const user = await prisma.users.findUnique({ where: { id } });
     if (!user) return res.status(404).json({ message: "Usuario no encontrado" });
 
@@ -392,7 +430,7 @@ export const registerDoctor = async (req, res) => {
         password: data.current_password,
         role: data.role,
         verified: true,
-        userId: newUser.id, // <-- referencia al usuario local
+        userId: newUser.id, // referencia al usuario local
       });
     } catch (authErr) {
       console.error(`Error al crear en AuthService para ${data.email}:`, authErr.message);
@@ -509,9 +547,7 @@ export const getDoctorsBySpecialty = async (req, res) => {
     const { specialty } = req.query;
     if (!specialty) return res.status(400).json({ message: "Debe proporcionar el nombre de la especialidad" });
 
-    // ==========================================
     // 1. Consultar specialization-service
-    // ==========================================
     let specialization;
     try {
       const specResponse = await axios.get(`${SPECIALIZATION_SERVICE_URL}/api/v1/specializations?name=${encodeURIComponent(specialty)}`);
@@ -525,9 +561,7 @@ export const getDoctorsBySpecialty = async (req, res) => {
 
     if (!specialization) return res.status(404).json({ message: `Especialidad "${specialty}" no encontrada` });
 
-    // ==========================================
     // 2. Consultar usuarios (solo médicos) con esa specializationId
-    // ==========================================
     let doctors = [];
     try {
       doctors = await prisma.users.findMany({
@@ -551,9 +585,7 @@ export const getDoctorsBySpecialty = async (req, res) => {
       return res.status(500).json({ message: "Error al obtener los doctores de la base de datos" });
     }
 
-    // ==========================================
     // 3. Responder con la lista de doctores
-    // ==========================================
     res.json(doctors);
 
   } catch (error) {
@@ -571,7 +603,7 @@ export const getBulkUsers = async (req, res) => {
       return res.status(400).json({ message: "userIds debe ser un array" });
     }
 
-    const prisma = getPrismaClient(); // ← tu función
+    const prisma = getPrismaClient();
 
     const users = await prisma.users.findMany({
       where: {

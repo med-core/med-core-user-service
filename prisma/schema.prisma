@@ -9,13 +9,21 @@ datasource db {
 }
 
 model Users {
-  id         String   @id @default(auto()) @map("_id") @db.ObjectId
-  email      String   @unique
-  fullname   String
-  role       Role     @default(PACIENTE)
-  status     UserStatus @default(PENDING)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id               String     @id @default(auto()) @map("_id") @db.ObjectId
+  email            String     @unique
+  fullname         String
+  identificacion   String?    @unique
+  current_password String
+  role             Role       @default(PACIENTE)
+  status           UserStatus @default(PENDING)
+
+  departmentId        String?   @db.ObjectId
+  specializationId    String?   @db.ObjectId
+  license_number      String?
+  phone               String?
+  date_of_birth       DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   @@map("Users")
 }
